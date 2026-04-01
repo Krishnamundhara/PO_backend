@@ -2,6 +2,11 @@
 // Configures Nodemailer and sends an email with the PDF attached
 
 const nodemailer = require('nodemailer')
+const dns = require('dns')
+
+// Node.js 17+ defaults to IPv6 first. Many cloud hosts (like Railway) have IPv6 interfaces 
+// that cannot route outbound SMTP traffic, causing ETIMEDOUT on smtp.gmail.com.
+dns.setDefaultResultOrder('ipv4first')
 
 function parseBoolean(value, defaultValue = false) {
   if (value === undefined || value === null || value === '') return defaultValue
