@@ -3,19 +3,36 @@
 
 const nodemailer = require('nodemailer')
 
+function parseBoolean(value, defaultValue = false) {
+  if (value === undefined || value === null || value === '') return defaultValue
+  return String(value).toLowerCase() === 'true'
+}
+
+function parseNumber(value, defaultValue) {
+  const parsed = parseInt(value, 10)
+  return Number.isNaN(parsed) ? defaultValue : parsed
+}
+
 /**
  * Creates and returns a configured Nodemailer SMTP transporter.
  * Reads credentials from environment variables.
  */
 function createTransporter() {
+  const port = parseNumber(process.env.SMTP_PORT, 587)
+  const secure = parseBoolean(process.env.SMTP_SECURE, port === 465)
+
   return nodemailer.createTransport({
     host: process.env.SMTP_HOST,                 // e.g. smtp.gmail.com
-    port: parseInt(process.env.SMTP_PORT, 10),   // 587 for TLS
-    secure: false,                               // false = STARTTLS (port 587)
+    port,
+    secure,
     auth: {
       user: process.env.SMTP_USER,              // your Gmail address
       pass: process.env.SMTP_PASS               // Gmail App Password
-    }
+    },
+    // Keep SMTP failures short and visible in logs instead of hanging.
+    connectionTimeout: parseNumber(process.env.SMTP_CONNECTION_TIMEOUT_MS, 15000),
+    greetingTimeout: parseNumber(process.env.SMTP_GREETING_TIMEOUT_MS, 10000),
+    socketTimeout: parseNumber(process.env.SMTP_SOCKET_TIMEOUT_MS, 20000)
   })
 }
 
@@ -30,11 +47,18 @@ function createTransporter() {
  * @returns {Promise<void>}
  */
 async function sendPOEmail({ poNumber, partyName, eventType = 'created', pdfBuffer }) {
+  if (!process.env.SMTP_HOST || !process.env.SMTP_USER || !process.env.SMTP_PASS || !process.env.RECEIVER_EMAIL) {
+    throw new Error('Missing SMTP config. Required: SMTP_HOST, SMTP_USER, SMTP_PASS, RECEIVER_EMAIL')
+  }
+
   const transporter = createTransporter()
+  const shouldVerify = parseBoolean(process.env.SMTP_VERIFY, false)
 
   // Verify SMTP connection before sending
-  await transporter.verify()
-  console.log('[emailService] SMTP connection verified.')
+  if (shouldVerify) {
+    await transporter.verify()
+    console.log('[emailService] SMTP connection verified.')
+  }
 
   // Build the email options
   const mailOptions = {
@@ -81,7 +105,15 @@ Please find the PO PDF attached to this email.
   }
 
   // Send the email
-  const info = await transporter.sendMail(mailOptions)
+  let info
+  try {
+    info = await transporter.sendMail(mailOptions)
+  } catch (error) {
+    // Retry once without prior verify path; transient SMTP network errors are common on cloud hosts.
+    console.warn(`[emailService] First send attempt failed: ${error.code || error.message}. Retrying once...`)
+    info = await transporter.sendMail(mailOptions)
+  }
+
   console.log(`[emailService] Email sent! Message ID: ${info.messageId}`)
   return info
 }

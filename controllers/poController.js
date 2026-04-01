@@ -50,7 +50,16 @@ async function handlePOEvent(req, res) {
 
   } catch (error) {
     // Catch any error from PDF generation or email sending
-    console.error('[poController] ❌ Error processing PO event:', error.message)
+    console.error('[poController] ❌ Error processing PO event:', {
+      message: error.message,
+      code: error.code,
+      command: error.command,
+      responseCode: error.responseCode
+    })
+    if (error.stack) {
+      console.error(error.stack)
+    }
+
     return res.status(500).json({
       success: false,
       message: 'Internal server error',
