@@ -110,6 +110,7 @@ async function generatePDFBuffer(poData) {
 
     browser = await puppeteer.launch({
       headless: true,
+      executablePath: process.env.PUPPETEER_EXECUTABLE_PATH || undefined,
       args: [
         '--no-sandbox',           // Required on Railway (Linux containers)
         '--disable-setuid-sandbox',
