@@ -60,6 +60,54 @@ function buildSmtpCandidates() {
   return candidates
 }
 
+async function sendViaResend({ poNumber, partyName, eventType, pdfBuffer }) {
+  const apiKey = process.env.RESEND_API_KEY
+  if (!apiKey) {
+    throw new Error('RESEND_API_KEY not set')
+  }
+
+  const from = process.env.RESEND_FROM || process.env.SMTP_USER || process.env.RECEIVER_EMAIL
+  const to = process.env.RECEIVER_EMAIL
+  if (!from || !to) {
+    throw new Error('RESEND_FROM or RECEIVER_EMAIL missing for Resend fallback')
+  }
+
+  const subject = `PO ${eventType === 'updated' ? 'Updated' : 'Created'} - ${poNumber}`
+  const text = `Purchase Order ${eventType === 'updated' ? 'Updated' : 'Created'}\n\nPO Number: ${poNumber}\nParty Name: ${partyName}\n`
+
+  const body = {
+    from,
+    to,
+    subject,
+    text,
+    html: `Purchase Order ${eventType === 'updated' ? 'Updated' : 'Created'} - ${poNumber}`,
+    attachments: [
+      {
+        filename: `PO-${poNumber}.pdf`,
+        content: pdfBuffer.toString('base64')
+      }
+    ]
+  }
+
+  const resp = await fetch('https://api.resend.com/emails', {
+    method: 'POST',
+    headers: {
+      Authorization: `Bearer ${apiKey}`,
+      'Content-Type': 'application/json'
+    },
+    body: JSON.stringify(body)
+  })
+
+  if (!resp.ok) {
+    const textBody = await resp.text()
+    throw new Error(`Resend API failed ${resp.status}: ${textBody}`)
+  }
+
+  const data = await resp.json()
+  console.log(`[emailService] Email sent via Resend, id: ${data.id || 'unknown'}`)
+  return data
+}
+
 /**
  * Sends an email with the PDF as an attachment.
  *
@@ -150,6 +198,12 @@ Please find the PO PDF attached to this email.
   }
 
   if (!info) {
+    // Fallback to Resend HTTPS API if available
+    if (process.env.RESEND_API_KEY) {
+      console.warn('[emailService] SMTP failed; attempting Resend API fallback')
+      return await sendViaResend({ poNumber, partyName, eventType, pdfBuffer })
+    }
+
     throw lastError || new Error('SMTP send failed for all transport candidates')
   }
 
