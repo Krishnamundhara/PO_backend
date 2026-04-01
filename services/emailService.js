@@ -13,27 +13,46 @@ function parseNumber(value, defaultValue) {
   return Number.isNaN(parsed) ? defaultValue : parsed
 }
 
-/**
- * Creates and returns a configured Nodemailer SMTP transporter.
- * Reads credentials from environment variables.
- */
-function createTransporter() {
-  const port = parseNumber(process.env.SMTP_PORT, 587)
-  const secure = parseBoolean(process.env.SMTP_SECURE, port === 465)
-
+function createTransporterFromConfig({ host, port, secure }) {
   return nodemailer.createTransport({
-    host: process.env.SMTP_HOST,                 // e.g. smtp.gmail.com
+    host,
     port,
     secure,
     auth: {
-      user: process.env.SMTP_USER,              // your Gmail address
-      pass: process.env.SMTP_PASS               // Gmail App Password
+      user: process.env.SMTP_USER,
+      pass: process.env.SMTP_PASS
     },
-    // Keep SMTP failures short and visible in logs instead of hanging.
     connectionTimeout: parseNumber(process.env.SMTP_CONNECTION_TIMEOUT_MS, 15000),
     greetingTimeout: parseNumber(process.env.SMTP_GREETING_TIMEOUT_MS, 10000),
     socketTimeout: parseNumber(process.env.SMTP_SOCKET_TIMEOUT_MS, 20000)
   })
+}
+
+function buildSmtpCandidates() {
+  const host = process.env.SMTP_HOST
+  const configuredPort = parseNumber(process.env.SMTP_PORT, 587)
+  const configuredSecure = parseBoolean(process.env.SMTP_SECURE, configuredPort === 465)
+
+  const candidates = [{ host, port: configuredPort, secure: configuredSecure }]
+
+  // Gmail deployments on cloud hosts may work on one mode and timeout on the other.
+  if (host === 'smtp.gmail.com') {
+    const gmailFallbacks = [
+      { host, port: 587, secure: false },
+      { host, port: 465, secure: true }
+    ]
+
+    for (const fallback of gmailFallbacks) {
+      const exists = candidates.some(
+        (candidate) => candidate.port === fallback.port && candidate.secure === fallback.secure
+      )
+      if (!exists) {
+        candidates.push(fallback)
+      }
+    }
+  }
+
+  return candidates
 }
 
 /**
@@ -51,14 +70,7 @@ async function sendPOEmail({ poNumber, partyName, eventType = 'created', pdfBuff
     throw new Error('Missing SMTP config. Required: SMTP_HOST, SMTP_USER, SMTP_PASS, RECEIVER_EMAIL')
   }
 
-  const transporter = createTransporter()
   const shouldVerify = parseBoolean(process.env.SMTP_VERIFY, false)
-
-  // Verify SMTP connection before sending
-  if (shouldVerify) {
-    await transporter.verify()
-    console.log('[emailService] SMTP connection verified.')
-  }
 
   // Build the email options
   const mailOptions = {
@@ -104,14 +116,36 @@ Please find the PO PDF attached to this email.
     ]
   }
 
-  // Send the email
+  // Send the email by trying configured mode first, then Gmail fallback mode if needed.
+  const candidates = buildSmtpCandidates()
+  let lastError
   let info
-  try {
-    info = await transporter.sendMail(mailOptions)
-  } catch (error) {
-    // Retry once without prior verify path; transient SMTP network errors are common on cloud hosts.
-    console.warn(`[emailService] First send attempt failed: ${error.code || error.message}. Retrying once...`)
-    info = await transporter.sendMail(mailOptions)
+
+  for (const candidate of candidates) {
+    const transporter = createTransporterFromConfig(candidate)
+    try {
+      if (shouldVerify) {
+        await transporter.verify()
+        console.log(
+          `[emailService] SMTP verified on ${candidate.host}:${candidate.port} secure=${candidate.secure}`
+        )
+      }
+
+      info = await transporter.sendMail(mailOptions)
+      console.log(
+        `[emailService] Email sent via ${candidate.host}:${candidate.port} secure=${candidate.secure}`
+      )
+      break
+    } catch (error) {
+      lastError = error
+      console.warn(
+        `[emailService] Send failed on ${candidate.host}:${candidate.port} secure=${candidate.secure} with ${error.code || error.message}`
+      )
+    }
+  }
+
+  if (!info) {
+    throw lastError || new Error('SMTP send failed for all transport candidates')
   }
 
   console.log(`[emailService] Email sent! Message ID: ${info.messageId}`)
